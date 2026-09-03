@@ -472,10 +472,9 @@ public class ES940DiskBBQVectorsFormat extends KnnVectorsFormat {
 
     @Override
     public KnnVectorsReader fieldsReader(SegmentReadState state) throws IOException {
-        // The offline build only reads raw float vectors back during merge: IVFVectorsWriter
-        // rebuilds the IVF index from scratch (mergeOneFieldIVF reads MergedVectorValues), never the
-        // old postings/centroids. So delegate raw-vector access to the flat reader; search at mount
-        // time goes through paimon-store's full ES940 reader. See ES940MergeVectorsReader.
+        // Merges rebuild the IVF index from the raw vectors. Searches also retain access to those
+        // vectors and use ES940MergeVectorsReader's exhaustive fallback until the optimized ES940
+        // IVF search implementation is available in the standalone library.
         return new ES940MergeVectorsReader(rawVectorFormat.fieldsReader(state));
     }
 

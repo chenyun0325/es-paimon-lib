@@ -1,0 +1,13 @@
+# The Aliyun OSS SDK uses Apache HttpClient, which opens outbound HTTPS connections and manages
+# its connection-maintenance threads. Paimon's Avro index-manifest reader uses zstd-jni, whose
+# decompressor loads its platform library from Elasticsearch's writable temporary directory.
+# Local mounts are deliberately constrained to path.repo.
+ALL-UNNAMED:
+  - manage_threads
+  - set_https_connection_properties
+  - outbound_network
+  - load_native_libraries
+  - files:
+      - path_setting: path.repo
+        basedir_if_relative: home
+        mode: read

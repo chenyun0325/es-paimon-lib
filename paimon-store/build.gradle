@@ -1,0 +1,206 @@
+def luceneProfile = (rootProject.findProperty('lucene') ?: '9').toString()
+def elasticsearchVersion = '9.4.0'
+def paimonVersion = '2.0.0'
+
+// Keep this project available to Gradle/IDE model import for every root profile. The plugin can
+// only be compiled and packaged with Lucene 10, but enforcing that during project evaluation
+// makes an ordinary IntelliJ sync fail as soon as paimon-store is included unconditionally.
+def verifyLucene10Profile = tasks.register('verifyLucene10Profile') {
+    group = 'verification'
+    description = 'Ensures paimon-store is built with the Elasticsearch 9.4 Lucene profile.'
+    doLast {
+        if (luceneProfile != '10') {
+            throw new GradleException(
+                    'paimon-store targets Elasticsearch 9.4 and must be built with -Plucene=10')
+        }
+    }
+}
+
+// Elasticsearch 9.4 is a Java 21 runtime regardless of the profile used to import the root build.
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+tasks.withType(JavaCompile).configureEach {
+    dependsOn verifyLucene10Profile
+}
+
+dependencies {
+    implementation project(':eslib-core')
+
+    // Elasticsearch and Lucene are supplied by the target ES node.
+    // Keep the complete ES compile graph: server API signatures and this plugin both reference
+    // Lucene and x-content classes. compileOnly keeps those node-provided JARs out of the bundle.
+    compileOnly "org.elasticsearch:elasticsearch:${elasticsearchVersion}"
+
+    // Paimon reads the selected snapshot and its index manifest on the coordinating node.
+    implementation "org.apache.paimon:paimon-core:${paimonVersion}"
+    // The table schema validates its declared data format even though mount planning never reads
+    // data files. paimon-format is already a shaded format bundle; suppress its Hadoop POM graph.
+    runtimeOnly("org.apache.paimon:paimon-format:${paimonVersion}") {
+        transitive = false
+    }
+    // eslib-core excludes Commons Logging from the OSS SDK; the ES runtime does not supply it.
+    runtimeOnly 'commons-logging:commons-logging:1.2'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.9.3'
+    testImplementation "org.apache.lucene:lucene-test-framework:10.4.0"
+}
+
+tasks.named('jar') {
+    archiveBaseName = 'paimon-store'
+    manifest {
+        attributes('Implementation-Version': project.version)
+    }
+}
+
+// paimon-format is a shaded format bundle, but it also contains a few classes already shipped
+// by paimon-common and zstd-jni. Elasticsearch checks every class in every plugin JAR at install
+// time, so create an ES-specific copy that keeps the format factories and removes only those
+// duplicate classes.
+def preparePaimonFormatJar = tasks.register('preparePaimonFormatJar', Jar) {
+    group = 'build'
+    description = 'Creates a Paimon format bundle without classes duplicated by other plugin JARs.'
+    archiveBaseName = 'paimon-format-es'
+    archiveVersion = paimonVersion
+    destinationDirectory = layout.buildDirectory.dir('generated-libs')
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    from({
+        def formatJars = configurations.runtimeClasspath.files.findAll {
+            it.name == "paimon-format-${paimonVersion}.jar"
+        }
+        if (formatJars.size() != 1) {
+            throw new GradleException(
+                    "Expected exactly one paimon-format-${paimonVersion}.jar, found ${formatJars}")
+        }
+        formatJars.collect { zipTree(it) }
+    })
+
+    // zstd-jni is already a normal runtime dependency of paimon-core.
+    exclude 'com/github/luben/zstd/**'
+    // paimon-common contains these shared Aircompressor APIs and LZO implementations.
+    exclude 'org/apache/paimon/shade/io/airlift/compress/Compressor.class'
+    exclude 'org/apache/paimon/shade/io/airlift/compress/Decompressor.class'
+    exclude 'org/apache/paimon/shade/io/airlift/compress/IncompatibleJvmException.class'
+    exclude 'org/apache/paimon/shade/io/airlift/compress/MalformedInputException.class'
+    exclude 'org/apache/paimon/shade/io/airlift/compress/lzo/LzoCompressor.class'
+    exclude 'org/apache/paimon/shade/io/airlift/compress/lzo/LzoDecompressor.class'
+    exclude 'org/apache/paimon/shade/io/airlift/compress/lzo/LzoRawCompressor.class'
+    exclude 'org/apache/paimon/shade/io/airlift/compress/lzo/LzoRawDecompressor.class'
+    exclude 'org/apache/paimon/shade/io/airlift/compress/lzo/UnsafeUtil.class'
+
+    doLast {
+        def archive = archiveFile.get().asFile
+        new java.util.zip.ZipFile(archive).withCloseable { zip ->
+            def required = [
+                    'META-INF/services/org.apache.paimon.format.FileFormatFactory',
+                    'org/apache/paimon/format/parquet/ParquetFileFormatFactory.class'
+            ]
+            def missing = required.findAll { zip.getEntry(it) == null }
+            if (missing.isEmpty() == false) {
+                throw new GradleException(
+                        "Cleaned Paimon format JAR is missing required entries: ${missing}")
+            }
+        }
+    }
+}
+
+tasks.register('bundlePlugin', Zip) {
+    group = 'distribution'
+    description = 'Builds an installable Elasticsearch 9.4 plugin archive.'
+    dependsOn verifyLucene10Profile
+    dependsOn tasks.named('jar')
+    dependsOn preparePaimonFormatJar
+    archiveBaseName = 'paimon-store'
+    archiveVersion = project.version
+    destinationDirectory = layout.buildDirectory.dir('distributions')
+
+    from(tasks.named('jar'))
+    from(preparePaimonFormatJar)
+    // Elasticsearch reads the descriptor before creating the plugin class loader, so it must
+    // also be present at the archive root (the copy inside the plugin JAR is harmless).
+    from(layout.projectDirectory.file('src/main/resources/plugin-descriptor.properties'))
+    from(layout.projectDirectory.dir('src/main/plugin-metadata'))
+    from(rootProject.file('LICENSE.txt'))
+    from(rootProject.file('NOTICE.txt'))
+    from(configurations.runtimeClasspath.filter { file ->
+        def name = file.name
+        // These dependencies duplicate classes supplied by Elasticsearch or another plugin JAR.
+        // Bundling them makes the installer reject the archive with a jar-hell error:
+        // - Paimon 2.0 pulls lz4-java 1.10.4, while ES supplies the ABI-compatible 1.10.1.
+        // - eslib-simdvec shares org.elasticsearch.simdvec classes with ES's simdvec module.
+        // - paimon-api 2.0 embeds the paimon-shade classes, so the standalone shade JARs
+        //   would duplicate 4,086 classes inside the plugin itself.
+        !name.startsWith('paimon-oss-') &&
+                !name.startsWith('paimon-format-') &&
+                !name.startsWith('hadoop-') &&
+                !name.startsWith('elasticsearch-') &&
+                !name.startsWith('lucene-') &&
+                !name.startsWith('log4j-') &&
+                !name.startsWith('lz4-java-') &&
+                !name.startsWith('eslib-simdvec-') &&
+                !name.startsWith('paimon-shade-') &&
+                !name.startsWith('org.jacoco.agent-')
+    })
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    doLast {
+        def forbiddenPrefixes = [
+                'lz4-java-',
+                'eslib-simdvec-',
+                'paimon-shade-',
+                'paimon-oss-',
+                'hadoop-',
+                'elasticsearch-',
+                'lucene-',
+                'org.jacoco.agent-'
+        ]
+        def archive = archiveFile.get().asFile
+        new java.util.zip.ZipFile(archive).withCloseable { zip ->
+            def policyEntry = zip.getEntry('entitlement-policy.yaml')
+            if (policyEntry == null) {
+                throw new GradleException('Plugin archive is missing entitlement-policy.yaml')
+            }
+            def policyText
+            zip.getInputStream(policyEntry).withCloseable { input ->
+                policyText = input.getText('UTF-8')
+            }
+            def requiredPolicyFragments = [
+                    'manage_threads',
+                    'set_https_connection_properties',
+                    'outbound_network',
+                    'load_native_libraries',
+                    'path_setting: path.repo'
+            ]
+            def missingPolicyFragments = requiredPolicyFragments.findAll {
+                policyText.contains(it) == false
+            }
+            if (missingPolicyFragments.isEmpty() == false) {
+                throw new GradleException(
+                        "Plugin entitlement policy is missing required entries: ${missingPolicyFragments}")
+            }
+
+            def forbidden = []
+            def hasCleanedFormat = false
+            def entries = zip.entries()
+            while (entries.hasMoreElements()) {
+                def entry = entries.nextElement()
+                if (entry.name == "paimon-format-es-${paimonVersion}.jar") {
+                    hasCleanedFormat = true
+                }
+                if (forbiddenPrefixes.any { prefix -> entry.name.startsWith(prefix) }) {
+                    forbidden.add(entry.name)
+                }
+            }
+            if (forbidden.isEmpty() == false) {
+                throw new GradleException(
+                        "Plugin archive contains forbidden duplicate-class JARs: ${forbidden}")
+            }
+            if (hasCleanedFormat == false) {
+                throw new GradleException('Plugin archive is missing the cleaned Paimon format JAR')
+            }
+        }
+    }
+}

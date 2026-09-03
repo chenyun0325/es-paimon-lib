@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: es-paimon-config
+  namespace: es-paimon-test
+data:
+  elasticsearch.yml: |
+    cluster.name: es-paimon-test
+    node.name: ${HOSTNAME}
+    network.host: 0.0.0.0
+    discovery.type: single-node
+
+    path.data: /usr/share/elasticsearch/data
+    path.logs: /usr/share/elasticsearch/logs
+
+    xpack.security.enabled: false
+    xpack.security.enrollment.enabled: false
+    bootstrap.memory_lock: false
+    action.destructive_requires_name: true
+
+    # Spark uses oss-cn-shanghai.aliyuncs.com. The explicit scheme also works with
+    # the Aliyun OSS Java SDK used by the Elasticsearch mount reader.
+    paimon.oss.endpoint: https://oss-cn-shanghai.aliyuncs.com
+
+  mount.json: |
+    {
+      "table_path": "oss://cy-test2/spark/default.db/my_table_3",
+      "index_name": "my_table_3",
+      "storage_mode": "remote",
+      "source_enabled": false,
+      "auth_type": "node"
+    }

@@ -38,6 +38,11 @@ sourceSets {
             }
         }
     }
+    test {
+        if (luceneProfile == '10') {
+            java.srcDir 'src/lucene10Test/java'
+        }
+    }
 }
 
 dependencies {

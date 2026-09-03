@@ -326,6 +326,10 @@ class DefaultESIndexBuilderTest {
                     new IndexSearcher(reader)
                             .search(new KnnFloatVectorQuery("vector", vectors[0], 10), 10);
             assertTrue(hits.scoreDocs.length > 0);
+            assertEquals(
+                    0,
+                    hits.scoreDocs[0].doc,
+                    "an exact self-vector query must return its source document first");
             for (ScoreDoc hit : hits.scoreDocs) {
                 assertTrue(Float.isFinite(hit.score));
             }

@@ -1,0 +1,85 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: paimon-mount
+  namespace: es-paimon-test
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: paimon-mount
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        # curlimages/curl declares USER curl_user by name. Kubernetes cannot prove that a
+        # name-only image user is non-root, so use an explicit numeric identity instead.
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mount
+          image: curlimages/curl:8.12.1
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+
+              if grep -q 'REPLACE_' /work/mount.json; then
+                echo 'mount.json still contains REPLACE_ placeholders; edit configmap.yaml first.' >&2
+                exit 2
+              fi
+
+              attempt=0
+              until curl --fail --silent http://es-paimon:9200/_cluster/health >/dev/null; do
+                attempt=$((attempt + 1))
+                if [ "$attempt" -ge 120 ]; then
+                  echo 'Elasticsearch did not become ready within 10 minutes.' >&2
+                  exit 1
+                fi
+                sleep 5
+              done
+
+              echo 'Installed plugins:'
+              curl --fail --silent --show-error \
+                'http://es-paimon:9200/_cat/plugins?v&h=name,component,version'
+              echo
+
+              echo 'Mount response:'
+              # Keep the Elasticsearch JSON error body on 4xx/5xx responses. Plain --fail
+              # suppresses it and leaves only curl exit code 22, which hides the mount cause.
+              curl --fail-with-body --silent --show-error \
+                --write-out '\nHTTP status: %{http_code}\n' \
+                -X POST 'http://es-paimon:9200/_paimon/mount?master_timeout=2m&timeout=2m' \
+                -H 'Content-Type: application/json' \
+                --data-binary @/work/mount.json
+              echo
+
+              echo 'Aliases:'
+              curl --fail --silent --show-error 'http://es-paimon:9200/_cat/aliases?v'
+              echo
+
+              echo 'Mounted shards:'
+              curl --fail --silent --show-error 'http://es-paimon:9200/_cat/shards?v'
+              echo
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: mount-request
+              mountPath: /work/mount.json
+              subPath: mount.json
+              readOnly: true
+      volumes:
+        - name: mount-request
+          configMap:
+            name: es-paimon-config
+            items:
+              - key: mount.json
+                path: mount.json

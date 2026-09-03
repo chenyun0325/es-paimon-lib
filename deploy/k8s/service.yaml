@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: es-paimon-headless
+  namespace: es-paimon-test
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: es-paimon
+  ports:
+    - name: transport
+      port: 9300
+      targetPort: transport
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: es-paimon
+  namespace: es-paimon-test
+spec:
+  selector:
+    app.kubernetes.io/name: es-paimon
+  ports:
+    - name: http
+      port: 9200
+      targetPort: http

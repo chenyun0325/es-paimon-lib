@@ -14,6 +14,7 @@ release repository.
 |---|---|
 | `eslib-core` | Public APIs, index builders/searchers, archive IO, HNSW, DiskBBQ, full-text, and scalar indexes |
 | `eslib-simdvec` | Standalone fallback implementation for Elasticsearch SIMD-vector APIs used by DiskBBQ |
+| `paimon-store` | Elasticsearch 9.4 plugin that mounts Paimon ESLib archives as read-only shards (Lucene 10 profile only) |
 
 The former `eslib-api` module has been merged into `eslib-core`.
 
@@ -28,6 +29,64 @@ The `lucene` Gradle property selects the Lucene source set and Java target:
 # Lucene 10.4 compatibility line: JDK 21+
 ./gradlew clean test -Plucene=10
 ```
+
+## Mount a Paimon index in Elasticsearch
+
+The `paimon-store` plugin implements a zero-copy, point-in-time mount. It reads the selected
+Paimon snapshot's live `es-index` Global Index entries, orders them by inclusive row-id range, and
+maps every archive to exactly one Elasticsearch primary shard. The archive's own Lucene files
+stay on the lake; Elasticsearch reads their byte ranges through `ArchiveDirectory` and stores only
+a small bootstrap commit in the node data path.
+
+The target combination is Elasticsearch 9.4.0, Lucene 10.4.0, Apache Paimon 2.0.0, and JDK 21.
+Build the installable plugin archive with:
+
+```shell
+./gradlew :paimon-store:bundlePlugin -Plucene=10
+```
+
+Install `paimon-store/build/distributions/paimon-store-1.0.7.zip` on every Elasticsearch data node
+and restart the cluster. For an OSS table, configure the endpoint and access-key ID in
+`elasticsearch.yml`, and keep the secret in the Elasticsearch keystore:
+
+```yaml
+paimon.oss.endpoint: https://oss-cn-hangzhou.aliyuncs.com
+paimon.oss.access_key_id: ${PAIMON_OSS_ACCESS_KEY_ID}
+```
+
+```shell
+bin/elasticsearch-keystore add paimon.oss.access_key_secret
+```
+
+For a local/shared-filesystem table, put its root in Elasticsearch's `path.repo`; the plugin's
+entitlement policy and runtime checks both restrict local reads to those roots.
+
+Mount the latest snapshot (or pass `snapshot_id` for a fixed snapshot):
+
+```http
+POST /_paimon/mount
+{
+  "table_path": "oss://example-bucket/warehouse/catalog.db/items",
+  "index_name": "items_search",
+  "vector_field_name": "embedding",
+  "storage_mode": "remote",
+  "source_enabled": false,
+  "auth_type": "node"
+}
+```
+
+The endpoint creates a numbered physical index such as `items_search_42`, then atomically points
+the stable `items_search` alias at it. The index uses `index.store.type=paimon`, is write-blocked,
+has one ES shard per live Paimon ESLib archive, and has no replicas so peer recovery cannot copy
+the lake segments. Lucene document ID `d` in a mounted shard maps to Paimon's absolute row ID as
+`rowRangeStart + d`.
+
+This first version deliberately supports only read-only search with `_source` disabled. It does
+not hydrate source rows, accept request-body OSS credentials, refresh an existing mount in place,
+or create replicas. A new Paimon snapshot is mounted as a new physical index and switched through
+the alias. See [`paimon-store/README.md`](paimon-store/README.md) for the API, security model, and
+failure semantics. A single-node OSS test deployment, image recipe, mount Job, and Spark metadata
+inspection SQL are available in [`deploy/k8s/README.md`](deploy/k8s/README.md).
 
 To write Maven artifacts to a local directory, publish each Lucene line separately. Their artifact
 IDs include the Lucene major version, so both lines can coexist in the same Maven repository:
