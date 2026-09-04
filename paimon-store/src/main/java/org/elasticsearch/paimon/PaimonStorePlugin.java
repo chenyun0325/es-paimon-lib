@@ -42,8 +42,7 @@ public final class PaimonStorePlugin extends Plugin
             Setting.stringListSetting(
                     "index.paimon.shards",
                     List.of(),
-                    Setting.Property.IndexScope,
-                    Setting.Property.Filtered);
+                    Setting.Property.IndexScope);
     static final Setting<Long> INDEX_SNAPSHOT_ID =
             Setting.longSetting(
                     "index.paimon.snapshot_id",
@@ -190,7 +189,8 @@ public final class PaimonStorePlugin extends Plugin
                         services.settings(),
                         ossAccessKeySecret,
                         currentEnvironment,
-                        holder.threadPool));
+                        holder.threadPool),
+                new RestPaimonMountStatusAction());
     }
 
     @Override

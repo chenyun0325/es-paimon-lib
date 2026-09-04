@@ -23,7 +23,7 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: prepare-config-and-keystore
-          image: es-paimon:9.4.0-1.0.7-r9
+          image: es-paimon:9.4.0-1.0.7-r10
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -84,7 +84,7 @@ spec:
               readOnly: true
       containers:
         - name: elasticsearch
-          image: es-paimon:9.4.0-1.0.7-r9
+          image: es-paimon:9.4.0-1.0.7-r10
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

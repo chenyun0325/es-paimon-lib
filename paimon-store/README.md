@@ -14,8 +14,9 @@ Elasticsearch data directory.
 4. `index.store.type=paimon` constructs an `ArchiveDirectory` for that shard. Local files use
    positional file reads and `oss://` files use OSS range GETs.
 5. Elasticsearch performs normal empty-store recovery once. At engine open, the plugin overlays
-   that bootstrap commit metadata on the lake's `SegmentInfos`. Only the resulting small
-   `segments_N` file is stored locally; all referenced segment data remains in the archive.
+   that bootstrap commit metadata on the lake's `SegmentInfos`. The resulting small `segments_N`
+   exists only in memory, leaving a self-contained bootstrap commit on disk for restart recovery;
+   all referenced segment data remains in the archive.
 6. A `ReadOnlyEngine` opens the composed directory. Index writes are blocked at both the cluster
    metadata and directory layers.
 
@@ -116,6 +117,30 @@ Successful response:
 The physical index is snapshot-specific. After it is created, the stable alias is switched from
 older matching physical indexes to the new one. Remounting the same alias and snapshot currently
 fails if that physical index already exists; it does not mutate the mounted index.
+
+The Base64/CRC encoded shard descriptors contain no credentials and can be inspected through the
+standard index settings API:
+
+```shell
+curl 'http://127.0.0.1:9200/items_search/_settings/index.paimon.shards*?flat_settings=true&pretty'
+```
+
+The response exposes one `index.paimon.shards.N` value per mounted primary shard. OSS access-key
+settings remain filtered and are never included in index settings.
+
+For decoded mount metadata, query the physical index or its alias:
+
+```shell
+curl 'http://127.0.0.1:9200/_paimon/mount/items_search?pretty'
+```
+
+The response contains the physical index, table path, snapshot ID, archive URI and length, Row-ID
+range, and every Lucene file offset. Limit a large response to one shard, or omit file details:
+
+```shell
+curl 'http://127.0.0.1:9200/_paimon/mount/items_search?shard=0&include_files=true&pretty'
+curl 'http://127.0.0.1:9200/_paimon/mount/items_search?include_files=false&pretty'
+```
 
 ## Query behavior and limits
 

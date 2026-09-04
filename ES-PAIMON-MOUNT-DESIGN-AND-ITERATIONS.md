@@ -131,7 +131,7 @@ archive 中的 [offset, length)
 
 - 带格式版本。
 - 带 CRC32 校验。
-- 使用 Base64 存储在 filtered index setting 中。
+- 使用 Base64 存储在可通过 `_settings` 查看、但不包含凭据的 index setting 中。
 - 不包含 OSS AccessKey Secret。
 
 数据读取流程：
@@ -143,7 +143,7 @@ archive 中的 [offset, length)
 5. `ArchiveIndexInput` 实现 seek、slice、clone、缓冲读取和 provider 复用。
 6. `SwitchableMountDirectory` 首先允许 Elasticsearch 完成标准空 store recovery。
 7. engine 打开时读取湖上 `SegmentInfos`，合成本地 bootstrap commit metadata。
-8. 本地只写入一个很小的 overlay `segments_N`。
+8. 内存中生成一个很小的 overlay `segments_N`，本地保留可独立校验的 bootstrap commit。
 9. `PaimonReadOnlyEngineFactory` 打开 `ReadOnlyEngine`。
 10. 后续 segment data 全部从湖上 archive 按需读取。
 

@@ -6,8 +6,8 @@ package org.elasticsearch.paimon;
 
 import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.index.SegmentInfos;
-import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.ByteBuffersDirectory;
+import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
@@ -26,24 +26,24 @@ import java.util.Set;
  * Lets Elasticsearch bootstrap its normal empty-store recovery locally, then atomically exposes
  * the lake archive as the shard's immutable Lucene directory.
  *
- * <p>Activation writes only a tiny local {@code segments_N} overlay. It references the remote
+ * <p>Activation writes a tiny in-memory {@code segments_N} overlay. It references the remote
  * segment files but carries Elasticsearch's bootstrap commit metadata (history UUID, translog
- * UUID, sequence numbers and index version), so normal shard invariants remain valid without
- * rewriting or copying the lake index.
+ * UUID, sequence numbers and index version). The durable local bootstrap commit remains
+ * self-contained so Elasticsearch can validate and allocate the shard after a node restart.
  */
 final class SwitchableMountDirectory extends Directory {
 
     private final Directory local;
     private final Directory lake;
-    private final boolean resumingMountedShard;
+    private final Directory overlay;
     private volatile boolean active;
     private volatile String overlaySegmentsFile;
     private volatile boolean closed;
 
-    SwitchableMountDirectory(Directory local, Directory lake) throws IOException {
+    SwitchableMountDirectory(Directory local, Directory lake) {
         this.local = local;
         this.lake = lake;
-        this.resumingMountedShard = containsCommit(local.listAll());
+        this.overlay = new ByteBuffersDirectory();
     }
 
     synchronized void activateLakeIndex() throws IOException {
@@ -52,26 +52,24 @@ final class SwitchableMountDirectory extends Directory {
             return;
         }
 
-        // On restart the latest local commit is the synthetic overlay and its .si files live in
-        // the lake directory, so read it through this directory's pre-active fallback view.
-        SegmentInfos bootstrap = SegmentInfos.readLatestCommit(this);
+        // Keep the durable local store self-contained. Elasticsearch's gateway allocator inspects
+        // the shard path through a plain FSDirectory before this custom Directory is constructed;
+        // persisting a segments_N that references lake-only files makes that pre-allocation check
+        // report a corrupt store after a node restart.
+        SegmentInfos bootstrap = SegmentInfos.readLatestCommit(local);
         SegmentInfos remote = SegmentInfos.readLatestCommit(lake);
         remote.setUserData(new HashMap<>(bootstrap.getUserData()), false);
 
-        // A node restart leaves the previous synthetic segments_N in the local directory. Advance
-        // the lake SegmentInfos generation in memory until its next commit cannot collide, then
-        // copy only that tiny commit file into the durable local overlay.
+        // Build the synthetic commit in memory. On every engine open (including after restart) it
+        // is reconstructed from the immutable lake commit and the durable bootstrap metadata.
         long localGeneration = SegmentInfos.getLastCommitGeneration(local);
-        try (Directory staging = new ByteBuffersDirectory()) {
-            do {
-                remote.commit(staging);
-            } while (remote.getGeneration() <= localGeneration);
-            String newOverlay = remote.getSegmentsFileName();
-            local.copyFrom(staging, newOverlay, newOverlay, IOContext.DEFAULT);
-            local.sync(List.of(newOverlay));
-            local.syncMetaData();
-            overlaySegmentsFile = newOverlay;
-        }
+        do {
+            remote.commit(overlay);
+        } while (remote.getGeneration() <= localGeneration);
+        String newOverlay = remote.getSegmentsFileName();
+        overlay.sync(List.of(newOverlay));
+        overlay.syncMetaData();
+        overlaySegmentsFile = newOverlay;
         active = true;
     }
 
@@ -82,19 +80,8 @@ final class SwitchableMountDirectory extends Directory {
     @Override
     public String[] listAll() throws IOException {
         ensureOpen();
-        if (active == false && resumingMountedShard == false) {
-            return local.listAll();
-        }
         if (active == false) {
-            List<String> names = new ArrayList<>();
-            Set<String> seen = new HashSet<>();
-            for (String name : local.listAll()) {
-                if (seen.add(name)) {
-                    names.add(name);
-                }
-            }
-            addLakeDataFiles(names, seen);
-            return names.toArray(new String[0]);
+            return local.listAll();
         }
         List<String> names = new ArrayList<>();
         Set<String> seen = new HashSet<>();
@@ -114,24 +101,14 @@ final class SwitchableMountDirectory extends Directory {
     @Override
     public long fileLength(String name) throws IOException {
         ensureOpen();
-        if (active == false && resumingMountedShard == false) {
+        if (active == false) {
             return local.fileLength(name);
         }
-        if (active && overlaySegmentsFile.equals(name)) {
-            return local.fileLength(name);
+        if (overlaySegmentsFile.equals(name)) {
+            return overlay.fileLength(name);
         }
         if (isCommitFile(name)) {
-            if (active) {
-                throw new NoSuchFileException(name);
-            }
-            return local.fileLength(name);
-        }
-        if (active == false) {
-            try {
-                return local.fileLength(name);
-            } catch (NoSuchFileException ignored) {
-                // The synthetic local commit references immutable lake segment files.
-            }
+            throw new NoSuchFileException(name);
         }
         return lake.fileLength(name);
     }
@@ -170,24 +147,14 @@ final class SwitchableMountDirectory extends Directory {
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
         ensureOpen();
-        if (active == false && resumingMountedShard == false) {
+        if (active == false) {
             return local.openInput(name, context);
         }
-        if (active && overlaySegmentsFile.equals(name)) {
-            return local.openInput(name, context);
+        if (overlaySegmentsFile.equals(name)) {
+            return overlay.openInput(name, context);
         }
         if (isCommitFile(name)) {
-            if (active) {
-                throw new NoSuchFileException(name);
-            }
-            return local.openInput(name, context);
-        }
-        if (active == false) {
-            try {
-                return local.openInput(name, context);
-            } catch (NoSuchFileException ignored) {
-                // Fall through to the lake archive.
-            }
+            throw new NoSuchFileException(name);
         }
         return lake.openInput(name, context);
     }
@@ -212,9 +179,18 @@ final class SwitchableMountDirectory extends Directory {
         closed = true;
         IOException failure = null;
         try {
-            lake.close();
+            overlay.close();
         } catch (IOException e) {
             failure = e;
+        }
+        try {
+            lake.close();
+        } catch (IOException e) {
+            if (failure == null) {
+                failure = e;
+            } else {
+                failure.addSuppressed(e);
+            }
         }
         try {
             local.close();
@@ -257,12 +233,4 @@ final class SwitchableMountDirectory extends Directory {
         }
     }
 
-    private static boolean containsCommit(String[] names) {
-        for (String name : names) {
-            if (name.startsWith(IndexFileNames.SEGMENTS + "_")) {
-                return true;
-            }
-        }
-        return false;
-    }
 }

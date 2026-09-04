@@ -32,9 +32,17 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PaimonStorePluginSecureSettingsTest {
+
+    @Test
+    void exposesShardDescriptorsButKeepsOssCredentialsFiltered() {
+        assertFalse(PaimonStorePlugin.INDEX_SHARDS.isFiltered());
+        assertTrue(PaimonStorePlugin.OSS_ACCESS_KEY_ID.isFiltered());
+    }
 
     @Test
     void discoversParquetFormatRequiredByTableSchemaValidation() {

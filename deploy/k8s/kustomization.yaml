@@ -9,4 +9,4 @@ resources:
 images:
   - name: es-paimon
     newName: es-paimon
-    newTag: 9.4.0-1.0.7-r9
+    newTag: 9.4.0-1.0.7-r10

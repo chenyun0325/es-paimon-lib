@@ -18,9 +18,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Base64;
+import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ShardMountSpecTest {
@@ -74,6 +77,36 @@ class ShardMountSpecTest {
         assertThrows(
                 IOException.class,
                 () -> ShardMountSpec.decode(Base64.getEncoder().encodeToString(bytes)));
+    }
+
+    @Test
+    void rendersReadableMountStatusWithOptionalFileOffsets(@TempDir Path tempDir)
+            throws Exception {
+        Path archivePath = tempDir.resolve("shard.index");
+        ShardMountSpec spec =
+                ShardMountSpec.decode(
+                        ShardMountSpec.encode(
+                                new LakeShardDescriptor(
+                                        archivePath.toString(),
+                                        7,
+                                        100,
+                                        102,
+                                        3,
+                                        legacyMetadata("_0.si", 2, 5))));
+
+        Map<String, Object> detailed =
+                RestPaimonMountStatusAction.shardView(4, spec, true);
+        assertEquals(4, detailed.get("shard"));
+        assertEquals(100L, detailed.get("row_range_start"));
+        assertEquals(102L, detailed.get("row_range_end"));
+        assertEquals(1, detailed.get("file_count"));
+        assertEquals(
+                List.of(Map.of("name", "_0.si", "offset", 2L, "length", 5L)),
+                detailed.get("files"));
+
+        Map<String, Object> summary =
+                RestPaimonMountStatusAction.shardView(4, spec, false);
+        assertFalse(summary.containsKey("files"));
     }
 
     private static byte[] legacyMetadata(String name, long offset, long length)

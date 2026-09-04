@@ -60,13 +60,16 @@ class SwitchableMountDirectoryTest {
     }
 
     @Test
-    void canReactivateAfterNodeRestartWithoutCommitNameCollision() throws Exception {
+    void keepsBootstrapStoreSelfContainedAcrossNodeRestart() throws Exception {
         Directory local = new ByteBuffersDirectory();
         Directory lake = new ByteBuffersDirectory();
         try {
             writeIndex(local, 0, Map.of("history_uuid", "history-restart"));
             writeIndex(lake, 2, Map.of());
             mountAndAssertDocumentCount(local, lake, 2);
+            try (DirectoryReader reader = DirectoryReader.open(local)) {
+                assertEquals(0, reader.numDocs());
+            }
             mountAndAssertDocumentCount(local, lake, 2);
         } finally {
             local.close();
