@@ -26,6 +26,7 @@ import org.elasticsearch.xcontent.XContentParser;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -95,12 +96,12 @@ final class RestPaimonMountAction extends BaseRestHandler {
         final String selectedField = optionalString(body, "vector_field_name");
         final Long snapshotId = optionalLong(body, "snapshot_id");
         final boolean sourceEnabled = optionalBoolean(body, "source_enabled", false);
+        final List<String> returnFields = optionalStringList(body, "return_fields");
         final String storageMode = optionalString(body, "storage_mode");
         final String authType = optionalString(body, "auth_type");
-        if (sourceEnabled) {
+        if (sourceEnabled == false && returnFields.isEmpty() == false) {
             throw new IllegalArgumentException(
-                    "source_enabled=true is not available yet; this mount exposes the Lucene "
-                            + "index and keeps _source disabled");
+                    "return_fields requires source_enabled=true");
         }
         if (storageMode != null
                 && storageMode.equals("mmap") == false
@@ -155,6 +156,12 @@ final class RestPaimonMountAction extends BaseRestHandler {
                                                         .put(
                                                                 PaimonStorePlugin.INDEX_SNAPSHOT_ID.getKey(),
                                                                 plan.snapshotId())
+                                                        .put(
+                                                                PaimonStorePlugin.INDEX_SOURCE_ENABLED.getKey(),
+                                                                sourceEnabled)
+                                                        .putList(
+                                                                PaimonStorePlugin.INDEX_RETURN_FIELDS.getKey(),
+                                                                returnFields)
                                                         .putList(
                                                                 PaimonStorePlugin.INDEX_SHARDS.getKey(),
                                                                 encodedShards)
@@ -164,7 +171,8 @@ final class RestPaimonMountAction extends BaseRestHandler {
                                                         .settings(indexSettings)
                                                         .mapping(
                                                                 ElasticsearchMappingBuilder.build(
-                                                                        plan.fieldLayout()));
+                                                                        plan.fieldLayout(),
+                                                                        sourceEnabled));
                                         create.masterNodeTimeout(masterTimeout);
                                         create.ackTimeout(ackTimeout);
 
@@ -180,6 +188,8 @@ final class RestPaimonMountAction extends BaseRestHandler {
                                                                                 alias,
                                                                                 physicalIndex,
                                                                                 plan,
+                                                                                sourceEnabled,
+                                                                                returnFields,
                                                                                 masterTimeout,
                                                                                 ackTimeout),
                                                                 failureListener::onFailure));
@@ -204,6 +214,8 @@ final class RestPaimonMountAction extends BaseRestHandler {
             String alias,
             String physicalIndex,
             PaimonMountPlan plan,
+            boolean sourceEnabled,
+            List<String> returnFields,
             org.elasticsearch.core.TimeValue masterTimeout,
             org.elasticsearch.core.TimeValue ackTimeout) {
         IndicesAliasesRequest aliases = new IndicesAliasesRequest(masterTimeout, ackTimeout);
@@ -233,6 +245,8 @@ final class RestPaimonMountAction extends BaseRestHandler {
                                 builder.field("index", physicalIndex);
                                 builder.field("snapshot_id", plan.snapshotId());
                                 builder.field("shards", plan.numberOfShards());
+                                builder.field("source_enabled", sourceEnabled);
+                                builder.field("return_fields", returnFields);
                                 builder.endObject();
                                 return new RestResponse(RestStatus.OK, builder);
                             }
@@ -279,5 +293,27 @@ final class RestPaimonMountAction extends BaseRestHandler {
             throw new IllegalArgumentException("Paimon mount field [" + name + "] must be boolean");
         }
         return (Boolean) value;
+    }
+
+    private static List<String> optionalStringList(Map<String, Object> body, String name) {
+        Object value = body.get(name);
+        if (value == null) {
+            return List.of();
+        }
+        if (value instanceof List<?> == false) {
+            throw new IllegalArgumentException(
+                    "Paimon mount field [" + name + "] must be an array of strings");
+        }
+        LinkedHashSet<String> fields = new LinkedHashSet<>();
+        for (Object element : (List<?>) value) {
+            if (element instanceof String == false || ((String) element).isBlank()) {
+                throw new IllegalArgumentException(
+                        "Paimon mount field ["
+                                + name
+                                + "] must contain only non-blank strings");
+            }
+            fields.add((String) element);
+        }
+        return List.copyOf(fields);
     }
 }

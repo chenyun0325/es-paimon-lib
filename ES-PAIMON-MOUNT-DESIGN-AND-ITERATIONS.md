@@ -174,18 +174,19 @@ archive 中的 [offset, length)
 Mapping 由 ESLib archive metadata 生成，采用：
 
 - `dynamic: strict`
-- `_source.enabled: false`
+- `source_enabled=false` 时 `_source.enabled: false`
+- `source_enabled=true` 时 `_source.enabled: true`，由插件 fetch sub-phase 回表填充
 - text/keyword/scalar/date/geo_point/dense_vector 映射
 - text 的 `.keyword` multifield
 - keyword 的 `.fulltext` multifield
 - DiskBBQ 映射为 Elasticsearch `dense_vector` 的 `bbq_disk`
 
-当前没有完整 JSON `_source`，也没有按全局 row-id 回表 Paimon。因此：
+开启 `source_enabled` 后，Lucene 仍然负责搜索，fetch 阶段再回表 Paimon：
 
-- `source_enabled=true` 会被 mount API 明确拒绝。
-- 原始值只能通过已有 DocValues 返回。
-- 示例字段可以使用 `content.keyword`、`category` 和 `price`。
-- 返回值位于 Elasticsearch hit 的 `fields`，不是 `_source`。
+- 全局 Row-ID = `rowRangeStart + shardLuceneDocId`。
+- Paimon 读取固定在 mount 时的 snapshot，并用 `withRowRanges([rowId,rowId])` 精确读一行。
+- `return_fields` 为空时返回 snapshot schema 的全部业务字段，非空时仅返回指定的顶层字段。
+- `source_enabled=false` 仍可以使用 DocValues，结果位于 hit 的 `fields`。
 
 ### 2.8 Lucene 9 写、Lucene 10 读
 
@@ -578,21 +579,19 @@ Mapping 中 `_source.enabled=false`，用户需要返回 `content`、`category` 
 
 **工程判断**
 
-当前 archive 中没有可直接作为 Elasticsearch `_source` 返回的 JSON，插件也没有通过 `rowRangeStart + luceneDocId` 回表 Paimon 做 row hydration。不能把“字段可搜索”误认为“完整源文档可返回”。
+当前 archive 中没有可直接作为 Elasticsearch `_source` 返回的 JSON，因此完整源记录必须通过 `rowRangeStart + luceneDocId` 回表 Paimon 获取。
 
 **主要处理**
 
-- 保持 `_source=false`。
-- `source_enabled=true` 在 mount API 中明确拒绝。
-- 使用 `docvalue_fields` 返回：
-  - `content.keyword`
-  - `category`
-  - `price`
-- 结果位于 hit 的 `fields`。
+- mount API 接收并持久化 `source_enabled` 和 `return_fields`。
+- `source_enabled=true` 时启用 `_source` mapping，在搜索 fetch sub-phase 中计算全局 Row-ID。
+- 使用固定 snapshot 的 Paimon `withRowRanges` 精确读取记录，转换为 JSON 安全类型后写入 hit `_source`。
+- 支持 `return_fields` 和 Elasticsearch `_source.includes` / `_source.excludes` 两级过滤。
+- 未开启回表时，仍可通过 `docvalue_fields` 返回已建索引字段。
 
 **结果**
 
-现有索引可以返回已配置 keyword/scalar DocValues 的字段，但完整源文档返回留待后续设计。
+开启回表的 mount 可在 `_search` hit 中返回完整 Paimon 记录；索引重启后由持久化 settings 恢复，不依赖 mount 时的内存状态。
 
 ### 3.15 DiskBBQ 查询抛 `build-only`：r8
 
@@ -861,18 +860,20 @@ paimon-store/build/distributions/paimon-store-1.0.7.zip
 - 重挂同一 snapshot 会因物理索引已存在而失败。
 - 旧物理索引需要额外生命周期清理。
 
-### 7.5 `_source=false`
+### 7.5 按需 Paimon 行回表
 
 **收益**
 
-- 无需重复存储完整源文档。
-- 不需要在第一阶段实现复杂的 Paimon 行回源。
+- Lucene archive 中无需重复存储完整源文档。
+- 搜索命中后才按 Row-ID 读取固定 snapshot 的 Paimon 记录。
+- `return_fields` 可限制返回的顶层字段。
+- 持久化 mount settings 支持 Elasticsearch 重启后继续回表。
 
 **代价**
 
-- 只能返回已经建立 DocValues 的字段。
-- 无法直接返回完整原始行。
-- 当前 row range 尚未注入 Elasticsearch hit 响应。
+- 每个 hit 会创建有界 Paimon reader，大 `size` 查询会增加远程 I/O。
+- 目前回表仅接入 `_search`；依赖源文档的 highlight/script 阶段早于插件 fetch sub-phase。
+- 缺失或重复 Row-ID 会使 fetch 失败，以避免静默返回错行。
 
 ### 7.6 DiskBBQ 精确回退
 
@@ -897,8 +898,8 @@ paimon-store/build/distributions/paimon-store-1.0.7.zip
 5. `_cat/plugins` 只能看到 `1.0.7`，不能区分 r7/r8/r9。
 6. `imagePullPolicy: IfNotPresent` 配合同标签重建可能继续使用旧镜像缓存。
 7. OSS shard-open 尚未通过 HEAD 校验 Content-Length、ETag 或 VersionId。
-8. `_source` 始终关闭，尚未实现 Paimon row hydration。
-9. `return_fields` 目前列为允许请求字段，但尚未解析和使用。
+8. Paimon row hydration 目前仅接入 `_search`，尚未接入 Get/MGet。
+9. source 回表是每 hit 一次精确 Row-ID 读取，尚未实现批量合并和请求级预取。
 10. `storage_mode` 当前只做兼容性校验，实际 provider 仍由 archive URI 决定。
 11. 旧 snapshot 物理索引不会自动删除。
 12. OSS 凭据轮换后需要重启 Elasticsearch 节点。
@@ -1021,5 +1022,5 @@ paimon-store/build/distributions/paimon-store-1.0.7.zip
 1. 自动化跨版本端到端验收。
 2. mount 后 shard readiness 保证。
 3. DiskBBQ IVF 远端查询性能。
-4. source/row hydration。
+4. source/row hydration 的批量化与 Get/MGet 支持。
 5. snapshot、archive、shard 和镜像的生产生命周期治理。

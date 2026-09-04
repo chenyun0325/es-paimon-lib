@@ -92,7 +92,8 @@ Content-Type: application/json
   "snapshot_id": 42,
   "vector_field_name": "embedding",
   "storage_mode": "remote",
-  "source_enabled": false,
+  "source_enabled": true,
+  "return_fields": [],
   "auth_type": "node"
 }
 ```
@@ -100,7 +101,10 @@ Content-Type: application/json
 `table_path` and `index_name` are required. `snapshot_id` defaults to the latest snapshot.
 `vector_field_name` selects archives containing that field when a snapshot carries several
 ESLib indexes. `storage_mode` accepts `remote` or `mmap` for request compatibility; actual access
-is selected from the archive URI. `auth_type`, when supplied, must be `node`.
+is selected from the archive URI. `source_enabled=true` enables Paimon row hydration for search
+hits. An omitted or empty `return_fields` array returns every business field in the snapshot
+schema; a non-empty array returns only those top-level fields. `return_fields` requires
+`source_enabled=true`. `auth_type`, when supplied, must be `node`.
 
 Successful response:
 
@@ -110,9 +114,21 @@ Successful response:
   "alias": "items_search",
   "index": "items_search_42",
   "snapshot_id": 42,
-  "shards": 8
+  "shards": 8,
+  "source_enabled": true,
+  "return_fields": []
 }
 ```
+
+The normal search API now returns the matching Paimon record in `_source`:
+
+```shell
+curl -sS 'http://127.0.0.1:9200/items_search/_search?pretty' \
+  -H 'Content-Type: application/json' \
+  -d '{"size":10,"query":{"match":{"content":"example"}}}'
+```
+
+Use `"_source": ["id", "content"]` in the search body for request-level field filtering.
 
 The physical index is snapshot-specific. After it is created, the stable alias is switched from
 older matching physical indexes to the new one. Remounting the same alias and snapshot currently
@@ -145,8 +161,17 @@ curl 'http://127.0.0.1:9200/_paimon/mount/items_search?include_files=false&prett
 ## Query behavior and limits
 
 - Mounted indexes are immutable and have `index.number_of_replicas=0` by design.
-- `_source` is disabled; `source_enabled=true` is rejected because row hydration is not yet
-  implemented.
+- With `source_enabled=true`, an ordinary `_search` response contains a hydrated `_source` from
+  the exact mounted Paimon snapshot. `_source: false` suppresses the lookup, and standard
+  `_source.includes` / `_source.excludes` filters are applied after `return_fields`.
+- Hydration is part of the search fetch phase: Lucene first finds a shard-local document ID, then
+  the plugin computes `rowRangeStart + docId` and uses Paimon's `withRowRanges` random-access read.
+  A missing or duplicate Row-ID fails the fetch instead of returning a mismatched record.
+- Table handles and FileIO clients are cached per `(table_path, snapshot_id)` until node shutdown;
+  each hit still creates a bounded Paimon reader. Keep normal Elasticsearch `size` limits for
+  queries returning large vectors or blobs.
+- Hydrated source currently applies to `_search`; source-dependent highlighting/script processing
+  runs before the plugin fetch sub-phase and should use indexed fields/doc values instead.
 - Fields are mapped from the ESLib archive metadata. Vector, text, keyword, numeric, date, and
   geo-point layouts are supported; incompatible layouts across archives fail the mount.
 - Native/JNI vector indexes are rejected because Elasticsearch has no compatible `dense_vector`
@@ -156,6 +181,10 @@ curl 'http://127.0.0.1:9200/_paimon/mount/items_search?include_files=false&prett
   correctness and on-disk compatibility but not the optimized IVF query performance yet.
 - Lucene doc IDs stay shard-local. The corresponding Paimon row ID is
   `rowRangeStart + luceneDocId`.
+- `index.paimon.source_enabled`, `index.paimon.return_fields`, `index.paimon.table_path`,
+  `index.paimon.snapshot_id`, and the shard descriptors are persisted in cluster-state settings.
+  They are read again when a node restarts, so source hydration does not depend on an in-memory
+  mount registration.
 - If an archive changes length after planning, shard opening fails instead of reading a different
   object. Paimon snapshots and their global-index files must remain available for the lifetime of
   the mount.

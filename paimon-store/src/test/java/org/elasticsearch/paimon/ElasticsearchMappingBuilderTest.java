@@ -55,6 +55,10 @@ class ElasticsearchMappingBuilderTest {
         assertEquals("cosine", vector.get("similarity"));
         assertEquals("bbq_disk", ((Map<String, Object>) vector.get("index_options")).get("type"));
         assertEquals(Map.of("enabled", false), mapping.get("_source"));
+
+        Map<String, Object> hydratedMapping =
+                ElasticsearchMappingBuilder.build(metadata, true);
+        assertEquals(Map.of("enabled", true), hydratedMapping.get("_source"));
     }
 
     @Test

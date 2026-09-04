@@ -109,6 +109,25 @@ class ShardMountSpecTest {
         assertFalse(summary.containsKey("files"));
     }
 
+    @Test
+    void convertsShardLocalDocumentIdToGlobalPaimonRowId(@TempDir Path tempDir)
+            throws Exception {
+        ShardMountSpec spec =
+                ShardMountSpec.decode(
+                        ShardMountSpec.encode(
+                                new LakeShardDescriptor(
+                                        tempDir.resolve("shard.index").toString(),
+                                        7,
+                                        100,
+                                        102,
+                                        3,
+                                        legacyMetadata("_0.si", 2, 5))));
+
+        assertEquals(100L, PaimonSourceFetchSubPhase.rowId(spec, 0));
+        assertEquals(102L, PaimonSourceFetchSubPhase.rowId(spec, 2));
+        assertThrows(IOException.class, () -> PaimonSourceFetchSubPhase.rowId(spec, 3));
+    }
+
     private static byte[] legacyMetadata(String name, long offset, long length)
             throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();

@@ -19,6 +19,11 @@ final class ElasticsearchMappingBuilder {
     private ElasticsearchMappingBuilder() {}
 
     static Map<String, Object> build(ESIndexArchiveMetadata metadata) throws IOException {
+        return build(metadata, false);
+    }
+
+    static Map<String, Object> build(ESIndexArchiveMetadata metadata, boolean sourceEnabled)
+            throws IOException {
         if (metadata.hasFieldConfigs() == false || metadata.indexedFieldNames().isEmpty()) {
             throw new IOException(
                     "The selected es-index uses legacy offset-only metadata and cannot infer an "
@@ -39,7 +44,7 @@ final class ElasticsearchMappingBuilder {
 
         Map<String, Object> mapping = new LinkedHashMap<>();
         mapping.put("dynamic", "strict");
-        mapping.put("_source", Map.of("enabled", false));
+        mapping.put("_source", Map.of("enabled", sourceEnabled));
         mapping.put("properties", properties);
         return mapping;
     }

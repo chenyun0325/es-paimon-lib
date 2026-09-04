@@ -59,6 +59,8 @@ final class RestPaimonMountStatusAction extends BaseRestHandler {
                                 IndexModule.INDEX_STORE_TYPE_SETTING.getKey(),
                                 PaimonStorePlugin.INDEX_TABLE_PATH.getKey(),
                                 PaimonStorePlugin.INDEX_SNAPSHOT_ID.getKey(),
+                                PaimonStorePlugin.INDEX_SOURCE_ENABLED.getKey(),
+                                PaimonStorePlugin.INDEX_RETURN_FIELDS.getKey() + "*",
                                 PaimonStorePlugin.INDEX_SHARDS.getKey() + "*");
 
         return channel ->
@@ -131,6 +133,10 @@ final class RestPaimonMountStatusAction extends BaseRestHandler {
                 "table_path", PaimonStorePlugin.INDEX_TABLE_PATH.get(settings));
         builder.field(
                 "snapshot_id", PaimonStorePlugin.INDEX_SNAPSHOT_ID.get(settings));
+        builder.field(
+                "source_enabled", PaimonStorePlugin.INDEX_SOURCE_ENABLED.get(settings));
+        builder.field(
+                "return_fields", PaimonStorePlugin.INDEX_RETURN_FIELDS.get(settings));
         builder.field("number_of_shards", encodedShards.size());
         builder.startArray("shards");
         if (selectedShard == null) {

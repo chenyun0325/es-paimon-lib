@@ -70,7 +70,7 @@ POST /_paimon/mount
   "index_name": "items_search",
   "vector_field_name": "embedding",
   "storage_mode": "remote",
-  "source_enabled": false,
+  "source_enabled": true,
   "auth_type": "node"
 }
 ```
@@ -81,11 +81,13 @@ has one ES shard per live Paimon ESLib archive, and has no replicas so peer reco
 the lake segments. Lucene document ID `d` in a mounted shard maps to Paimon's absolute row ID as
 `rowRangeStart + d`.
 
-This first version deliberately supports only read-only search with `_source` disabled. It does
-not hydrate source rows, accept request-body OSS credentials, refresh an existing mount in place,
-or create replicas. A new Paimon snapshot is mounted as a new physical index and switched through
-the alias. See [`paimon-store/README.md`](paimon-store/README.md) for the API, security model, and
-failure semantics. A single-node OSS test deployment, image recipe, mount Job, and Spark metadata
+When `source_enabled=true`, the search fetch phase converts each shard-local Lucene document ID
+to its absolute Paimon Row-ID and reads the complete row from the same fixed snapshot. An optional
+`return_fields` array limits the returned top-level fields. The plugin does not accept request-body
+OSS credentials, refresh an existing mount in place, or create replicas. A new Paimon snapshot is
+mounted as a new physical index and switched through the alias. See
+[`paimon-store/README.md`](paimon-store/README.md) for the API, security model, and failure
+semantics. A single-node OSS test deployment, image recipe, mount Job, and Spark metadata
 inspection SQL are available in [`deploy/k8s/README.md`](deploy/k8s/README.md).
 
 To write Maven artifacts to a local directory, publish each Lucene line separately. Their artifact

@@ -21,7 +21,9 @@ import org.elasticsearch.plugins.ActionPlugin;
 import org.elasticsearch.plugins.EnginePlugin;
 import org.elasticsearch.plugins.IndexStorePlugin;
 import org.elasticsearch.plugins.Plugin;
+import org.elasticsearch.plugins.SearchPlugin;
 import org.elasticsearch.rest.RestHandler;
+import org.elasticsearch.search.fetch.FetchSubPhase;
 
 import java.io.IOException;
 import java.util.Collection;
@@ -34,7 +36,7 @@ import java.util.function.Supplier;
 
 /** Elasticsearch 9.4 plugin that mounts Paimon ESLib archives as immutable shards. */
 public final class PaimonStorePlugin extends Plugin
-        implements ActionPlugin, IndexStorePlugin, EnginePlugin {
+        implements ActionPlugin, IndexStorePlugin, EnginePlugin, SearchPlugin {
 
     public static final String STORE_TYPE = "paimon";
 
@@ -54,6 +56,18 @@ public final class PaimonStorePlugin extends Plugin
             Setting.simpleString(
                     "index.paimon.table_path",
                     "",
+                    Setting.Property.IndexScope,
+                    Setting.Property.Final);
+    static final Setting<Boolean> INDEX_SOURCE_ENABLED =
+            Setting.boolSetting(
+                    "index.paimon.source_enabled",
+                    false,
+                    Setting.Property.IndexScope,
+                    Setting.Property.Final);
+    static final Setting<List<String>> INDEX_RETURN_FIELDS =
+            Setting.stringListSetting(
+                    "index.paimon.return_fields",
+                    List.of(),
                     Setting.Property.IndexScope,
                     Setting.Property.Final);
 
@@ -77,6 +91,7 @@ public final class PaimonStorePlugin extends Plugin
             new ConcurrentHashMap<>();
     private volatile ThreadPoolHolder threadPoolHolder;
     private volatile Environment environment;
+    private volatile PaimonRowLoader rowLoader;
 
     public PaimonStorePlugin(Settings settings) {
         this.nodeSettings = settings;
@@ -103,6 +118,8 @@ public final class PaimonStorePlugin extends Plugin
                 INDEX_SHARDS,
                 INDEX_SNAPSHOT_ID,
                 INDEX_TABLE_PATH,
+                INDEX_SOURCE_ENABLED,
+                INDEX_RETURN_FIELDS,
                 OSS_ENDPOINT,
                 OSS_ACCESS_KEY_ID,
                 OSS_ACCESS_KEY_SECRET);
@@ -112,7 +129,13 @@ public final class PaimonStorePlugin extends Plugin
     public Collection<?> createComponents(PluginServices services) {
         threadPoolHolder = new ThreadPoolHolder(services.threadPool());
         environment = services.environment();
+        rowLoader = new PaimonRowLoader(nodeSettings, ossAccessKeySecret, environment);
         return List.of();
+    }
+
+    @Override
+    public List<FetchSubPhase> getFetchSubPhases(FetchPhaseConstructionContext context) {
+        return List.of(new PaimonSourceFetchSubPhase(() -> rowLoader));
     }
 
     @Override
@@ -196,6 +219,15 @@ public final class PaimonStorePlugin extends Plugin
     @Override
     public void close() throws IOException {
         IOException failure = null;
+        PaimonRowLoader currentRowLoader = rowLoader;
+        rowLoader = null;
+        if (currentRowLoader != null) {
+            try {
+                currentRowLoader.close();
+            } catch (IOException e) {
+                failure = e;
+            }
+        }
         for (SwitchableMountDirectory directory : directories.values()) {
             try {
                 directory.close();

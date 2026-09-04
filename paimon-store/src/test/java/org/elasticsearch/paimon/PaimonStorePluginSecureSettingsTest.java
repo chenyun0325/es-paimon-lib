@@ -41,6 +41,8 @@ class PaimonStorePluginSecureSettingsTest {
     @Test
     void exposesShardDescriptorsButKeepsOssCredentialsFiltered() {
         assertFalse(PaimonStorePlugin.INDEX_SHARDS.isFiltered());
+        assertFalse(PaimonStorePlugin.INDEX_SOURCE_ENABLED.isFiltered());
+        assertFalse(PaimonStorePlugin.INDEX_RETURN_FIELDS.isFiltered());
         assertTrue(PaimonStorePlugin.OSS_ACCESS_KEY_ID.isFiltered());
     }
 

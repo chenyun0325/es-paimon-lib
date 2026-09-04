@@ -47,17 +47,8 @@ final class PaimonSnapshotPlanner {
 
     PaimonMountPlan plan(String tablePath, Long requestedSnapshotId, String selectedField)
             throws IOException {
-        Options options = new Options();
-        options.set("path", resolveTablePath(tablePath));
-        configureObjectStore(options, tablePath);
-
-        try (FileIO fileIO = createStaticFileIO(options, tablePath)) {
-            final FileStoreTable table;
-            try {
-                table = FileStoreTableFactory.create(fileIO, options);
-            } catch (RuntimeException e) {
-                throw new IOException("Failed to open Paimon table " + tablePath, e);
-            }
+        try (TableSession session = openTable(tablePath)) {
+            FileStoreTable table = session.table();
 
             Snapshot snapshot;
             try {
@@ -118,6 +109,24 @@ final class PaimonSnapshotPlanner {
                                 + "'");
             }
             return PaimonMountPlan.create(snapshot.id(), candidates);
+        }
+    }
+
+    TableSession openTable(String tablePath) throws IOException {
+        Options options = new Options();
+        options.set("path", resolveTablePath(tablePath));
+        configureObjectStore(options, tablePath);
+
+        FileIO fileIO = createStaticFileIO(options, tablePath);
+        try {
+            return new TableSession(fileIO, FileStoreTableFactory.create(fileIO, options));
+        } catch (RuntimeException e) {
+            try {
+                fileIO.close();
+            } catch (IOException closeFailure) {
+                e.addSuppressed(closeFailure);
+            }
+            throw new IOException("Failed to open Paimon table " + tablePath, e);
         }
     }
 
@@ -199,5 +208,24 @@ final class PaimonSnapshotPlanner {
                     "Local Paimon table is outside every path.repo root: " + tablePath);
         }
         return resolved;
+    }
+
+    static final class TableSession implements AutoCloseable {
+        private final FileIO fileIO;
+        private final FileStoreTable table;
+
+        private TableSession(FileIO fileIO, FileStoreTable table) {
+            this.fileIO = fileIO;
+            this.table = table;
+        }
+
+        FileStoreTable table() {
+            return table;
+        }
+
+        @Override
+        public void close() throws IOException {
+            fileIO.close();
+        }
     }
 }
